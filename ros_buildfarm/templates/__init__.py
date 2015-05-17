@@ -6,18 +6,18 @@ try:
 except ImportError:
     from io import StringIO
 import os
+import pkg_resources
 import sys
 import time
 from xml.sax.saxutils import escape
-
-template_basepath = os.path.abspath(os.path.dirname(__file__))
 
 interpreter = None
 template_hooks = None
 
 
 def expand_template(template_name, data, options=None):
-    global template_basepath
+    """Return expanded template as a string."""
+
     global interpreter
     global template_hooks
 
@@ -26,11 +26,12 @@ def expand_template(template_name, data, options=None):
         interpreter = Interpreter(output=output, options=options)
         for template_hook in template_hooks or []:
             interpreter.addHook(template_hook)
-        template_path = os.path.join(template_basepath, template_name)
+        template_path = data['template_path']
+
         # create copy before manipulating
         data = dict(data)
+
         # add some generic information to context
-        data['template_name'] = template_name
         now = time.localtime()
         data['now_str'] = time.strftime(
             '%Y-%m-%d %H:%M:%S %z', now)
@@ -56,12 +57,14 @@ def expand_template(template_name, data, options=None):
 
 
 def _add_helper_functions(data):
+    """Add interpreter helper functions."""
     data['ESCAPE'] = _escape_value
     data['SNIPPET'] = _expand_snippet
     data['TEMPLATE'] = _expand_template
 
 
 def _escape_value(value):
+    """Return escape value respective of input isinstance type."""
     if isinstance(value, list):
         value = [_escape_value(v) for v in value]
     elif isinstance(value, set):
@@ -72,14 +75,18 @@ def _escape_value(value):
 
 
 def _expand_snippet(snippet_name, **kwargs):
+    """Extract template name from snippet name and expand template."""
     template_name = 'snippet/%s.xml.em' % snippet_name
     _expand_template(template_name, **kwargs)
 
 
 def _expand_template(template_name, **kwargs):
-    global template_basepath
+    """Open template and apply interpreter."""
+    template_name = os.path.join('templates', template_name)
+    template_package = _find_first_template(template_name, **kwargs)
+
     global interpreter
-    template_path = os.path.join(template_basepath, template_name)
+    template_path = pkg_resources.resource_filename(template_package, template_name)
     _add_helper_functions(kwargs)
     with open(template_path, 'r') as h:
         try:
@@ -91,26 +98,68 @@ def _expand_template(template_name, **kwargs):
             sys.exit(1)
 
 
-def create_dockerfile(template_name, data, dockerfile_dir):
-    data['template_name'] = template_name
+def _find_first_template(template_name, **kwargs):
+    """Return first found template resource respective to template_packages order."""
+    if 'template_packages' not in kwargs:
+        # Default to ros_buildfarm if none given
+        return 'ros_buildfarm'
 
+    # Look through each given template package
+    for template_package in kwargs['template_packages']:
+        if pkg_resources.resource_exists(template_package, template_name):
+            return template_package
+
+    # Default to ros_buildfarm if none found
+    return 'ros_buildfarm'
+
+
+def _find_first_wrappers(**data):
+    """Return first found wrappers resource respective to template_packages order."""
     wrapper_scripts = {}
-    wrapper_script_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-        'scripts', 'wrapper')
-    for filename in os.listdir(wrapper_script_path):
-        if not filename.endswith('.py'):
-            continue
-        abs_file_path = os.path.join(wrapper_script_path, filename)
-        with open(abs_file_path, 'r') as h:
-            content = h.read()
-            wrapper_scripts[filename] = content
-    data['wrapper_scripts'] = wrapper_scripts
+    wrapper_subpath = 'templates/wrapper'
+    for template_package in data['template_packages']:
+        if pkg_resources.resource_exists(template_package, wrapper_subpath):
+            wrapper_path = pkg_resources.resource_filename(template_package, wrapper_subpath)
+            wrapper_files = pkg_resources.resource_listdir(template_package, wrapper_subpath)
+            for filename in wrapper_files:
+                if not filename.endswith('.py'):
+                    continue
+                if filename in wrapper_scripts:
+                    continue
+                abs_file_path = os.path.join(wrapper_path, filename)
+                with open(abs_file_path, 'r') as h:
+                    content = h.read()
+                    wrapper_scripts[filename] = content
+    return wrapper_scripts
 
+
+def create_dockerfile(data):
+    """Write Dockerfile to disk using data and template."""
+
+    # Create copy of data
+    data = dict(data)
+
+    # Prepend templates folder to name
+    data['template_name'] = os.path.join('templates',  data['template_name'])
+
+    template_name = data['template_name']
+    dockerfile_dir = data['dockerfile_dir']
+
+    # Find first instance of tempate_name given order of template_packages
+    template_package = _find_first_template(**data)
+    template_path = pkg_resources.resource_filename(template_package, template_name)
+    data['template_path'] = template_path
+
+    # Find first instance of wrapper_scripts given order of template_packages
+    data['wrapper_scripts'] = _find_first_wrappers(**data)
+
+    # Use wrapper scripts to expand template
     content = expand_template(template_name, data)
+
+    # Print and save content to Dockerfile
     dockerfile = os.path.join(dockerfile_dir, 'Dockerfile')
     print("Generating Dockerfile '%s':" % dockerfile)
-    for line in content.splitlines():
-        print(' ', line)
+    # for line in content.splitlines():
+    #     print(' ', line)
     with open(dockerfile, 'w') as h:
         h.write(content)
