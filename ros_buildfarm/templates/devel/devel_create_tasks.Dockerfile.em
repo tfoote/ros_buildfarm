@@ -35,6 +35,8 @@ RUN echo "@now_str"
 ENV ROSDISTRO_INDEX_URL @rosdistro_index_url
 RUN rosdep init
 
+RUN echo "deb http://packages.ros.org/ros/ubuntu trusty main" > /etc/apt/sources/list.d/custom-rosdep.list
+
 USER buildfarm
 
 ENTRYPOINT ["sh", "-c"]
